@@ -487,7 +487,9 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
       case None =>{
         switchElseStart()
         out.puts(s"""throw new InvalidOperationException("Default switch branch hit in \\"${id.humanReadable}\\"");""");
-        switchElseEnd()
+        // do not use switchElseEnd because it emits "break;" leading to unreachable code
+        out.dec
+        out.puts("}")
 
         // TODO signaling error from compiler would be best but cannot be done yet
         // https://github.com/kaitai-io/kaitai_struct/issues/208
