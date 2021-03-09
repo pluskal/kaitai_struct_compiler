@@ -9,7 +9,7 @@ import io.kaitai.struct.format._
 import io.kaitai.struct.languages.components._
 import io.kaitai.struct.translators.{CSharpAsyncTranslator, TypeDetector}
 
-class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeConfig)
+class CSharpAsyncCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig)
   extends LanguageCompiler(typeProvider, new RuntimeConfig(true, config.readStoresPos, config.opaqueTypes))
     with UpperCamelCaseClasses
     with ObjectOrientedLanguage
@@ -41,8 +41,8 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     outHeader.puts(s"#pragma warning disable IDE1006 // Naming rule violation: Prefix 'M_' is not expected")
     outHeader.puts(s"#pragma warning disable IDE0044 // Make field readonly")
     outHeader.puts(s"#pragma warning disable CA1819 // Properties should not return arrays")
-    outHeader.puts(s"#pragma warning disable IDE0060 // Remove unused parameter") 
-    outHeader.puts(s"#pragma warning disable CA1801 // Remove the parameter or use it in the method body") 
+    outHeader.puts(s"#pragma warning disable IDE0060 // Remove unused parameter")
+    outHeader.puts(s"#pragma warning disable CA1801 // Remove the parameter or use it in the method body")
     outHeader.puts
     outHeader.puts(s"#nullable disable")
     outHeader.puts
@@ -89,7 +89,7 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
   override def classFooter(name: String): Unit = fileFooter(name)
 
-  
+
   private var _className: String = null
 
   override def classConstructorHeader(name: String, parentType: DataType, rootClassName: String, isHybrid: Boolean, params: List[ParamDefSpec]): Unit = {
@@ -136,13 +136,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
   override def classConstructorFooter: Unit = fileFooter(null)
 
-  override def runRead(): Unit = {}
+  override def runRead(name: List[String]): Unit =
+    out.puts("_read();")
 
   override def runReadCalc(): Unit = {
     out.puts
     out.puts(s"if (${privateMemberName(EndianIdentifier)} == null) {")
     out.inc
-    out.puts("throw new Exception(\"Unable to decide on endianness\");")
+    out.puts(s"throw new ${ksErrorName(UndecidedEndiannessError)}();")
     importList.add("System")
     out.dec
     out.puts(s"} else if (${privateMemberName(EndianIdentifier)} == true) {")
@@ -158,7 +159,7 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
   override def readHeader(endian: Option[FixedEndian], isEmpty: Boolean) = {
     val suffix = endian match {
-      case Some(e) => s"${e.toSuffix.toUpperCase}"
+      case Some(e) => Utils.upperUnderscoreCase(e.toSuffix)
       case None => ""
     }
     out.puts(s"public async Task<${type2class(_className)}> Read${suffix}Async(CancellationToken cancellationToken = default)")
@@ -197,7 +198,7 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
       out.puts("/// <summary>")
       out.putsLines("/// ", XMLUtils.escape(restLine))
-      out.puts("/// </summary>")     
+      out.puts("/// </summary>")
     }
 
     doc.ref.foreach { docRef =>
@@ -228,28 +229,28 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
   override def attrFixedContentsParse(attrName: Identifier, contents: String): Unit =
     out.puts(s"${privateMemberName(attrName)} = $normalIO.EnsureFixedContents($contents);")
 
-  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier): Unit = {
-    val srcName = privateMemberName(varSrc)
-    val destName = privateMemberName(varDest)
+  override def attrProcess(proc: ProcessExpr, varSrc: Identifier, varDest: Identifier, rep: RepeatSpec): Unit = {
+    val srcExpr = getRawIdExpr(varSrc, rep)
 
-    proc match {
+    val expr = proc match {
       case ProcessXor(xorValue) =>
-        out.puts(s"$destName = $normalIO.ProcessXor($srcName, ${expression(xorValue)});")
+        s"$normalIO.ProcessXor($srcExpr, ${expression(xorValue)})"
       case ProcessZlib =>
-        out.puts(s"$destName = $normalIO.ProcessZlib($srcName);")
+        s"$normalIO.ProcessZlib($srcExpr)"
       case ProcessRotate(isLeft, rotValue) =>
         val expr = if (isLeft) {
           expression(rotValue)
         } else {
           s"8 - (${expression(rotValue)})"
         }
-        out.puts(s"$destName = $normalIO.ProcessRotateLeft($srcName, $expr, 1);")
+        s"$normalIO.ProcessRotateLeft($srcExpr, $expr, 1)"
       case ProcessCustom(name, args) =>
         val procClass = types2class(name)
         val procName = s"_process_${idToStr(varSrc)}"
         out.puts(s"$procClass $procName = new $procClass(${args.map(expression).mkString(", ")});")
-        out.puts(s"$destName = $procName.Decode($srcName);")
+        s"$procName.Decode($srcExpr)"
     }
+    handleAssignment(varDest, expr, rep, false)
   }
 
   override def allocateIO(varName: Identifier, rep: RepeatSpec): String = {
@@ -258,13 +259,20 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     val ioName = s"io_$privateVarName"
 
     val args = rep match {
-      case RepeatEos | RepeatExpr(_) => s"$privateVarName[$privateVarName.Count - 1]"
       case RepeatUntil(_) => translator.doName(Identifier.ITERATOR2)
-      case NoRepeat => privateVarName
+      case _ => getRawIdExpr(varName, rep)
     }
 
     out.puts(s"var $ioName = new $kstreamName($args);")
     ioName
+  }
+
+  def getRawIdExpr(varName: Identifier, rep: RepeatSpec): String = {
+    val memberName = privateMemberName(varName)
+    rep match {
+      case NoRepeat => memberName
+      case _ => s"$memberName[$memberName.Count - 1]"
+    }
   }
 
   override def useIO(ioEx: expr): String = {
@@ -299,11 +307,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
   override def condIfFooter(expr: expr): Unit = fileFooter(null)
 
-  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: Boolean): Unit = {
+  override def condRepeatEosHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw): Unit = {
     importList.add("System.Collections.Generic")
 
-    if (needRaw)
+    if (needRaw.level > 1)
       out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>();")
+    if (needRaw.level >= 2)
+       out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>();")
+
     out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}();")
     out.puts("{")
     out.inc
@@ -324,11 +335,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     out.puts("}")
   }
 
-  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: Boolean, repeatExpr: expr): Unit = {
+  override def condRepeatExprHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, repeatExpr: expr): Unit = {
     importList.add("System.Collections.Generic")
 
-    if (needRaw)
+    if (needRaw.level > 1)
       out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>((int) (${expression(repeatExpr)}));")
+    if (needRaw.level >= 2)
+       out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>((int) (${expression(repeatExpr)}));")
+
     out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}((int) (${expression(repeatExpr)}));")
     out.puts(s"for (ulong i = 0; i < ${expression(repeatExpr)}; i++)")
     out.puts("{")
@@ -341,11 +355,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
 
   override def condRepeatExprFooter: Unit = fileFooter(null)
 
-  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: Boolean, untilExpr: expr): Unit = {
+  override def condRepeatUntilHeader(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
     importList.add("System.Collections.Generic")
 
-    if (needRaw)
+    if (needRaw.level > 1)
       out.puts(s"${privateMemberName(RawIdentifier(id))} = new List<byte[]>();")
+    if (needRaw.level >= 2)
+      out.puts(s"${privateMemberName(RawIdentifier(RawIdentifier(id)))} = new List<byte[]>();")
+
     out.puts(s"${privateMemberName(id)} = new ${kaitaiType2NativeType(ArrayTypeInStream(dataType))}();")
     out.puts("{")
     out.inc
@@ -365,7 +382,7 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     out.puts(s"${privateMemberName(id)}.Add($tempVar);")
   }
 
-  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: Boolean, untilExpr: expr): Unit = {
+  override def condRepeatUntilFooter(id: Identifier, io: String, dataType: DataType, needRaw: NeedRaw, untilExpr: expr): Unit = {
     typeProvider._currentIteratorType = Some(dataType)
     out.puts("i++;")
     out.dec
@@ -380,6 +397,16 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
   override def handleAssignmentTempVar(dataType: DataType, id: String, expr: String): Unit =
     out.puts(s"${kaitaiType2NativeType(dataType)} $id = $expr;")
 
+  override def blockScopeHeader: Unit = {
+    out.puts("{")
+    out.inc
+  }
+
+  override def blockScopeFooter: Unit = {
+    out.dec
+    out.puts("}")
+  }
+
   override def parseExpr(dataType: DataType, assignType: DataType, io: String, defEndian: Option[FixedEndian]): String = {
     dataType match {
       case t: ReadableType =>
@@ -390,10 +417,10 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
         s"await $io.ReadBytesFullAsync(cancellationToken)"
       case BytesTerminatedType(terminator, include, consume, eosError, _) =>
         s"await $io.ReadBytesTermAsync($terminator, $include, $consume, $eosError, cancellationToken)"
-      case BitsType1 =>
-        s"await $io.ReadBitsIntAsync(1, cancellationToken) != 0"
-      case BitsType(width: Int) =>
-        s"await $io.ReadBitsIntAsync($width, cancellationToken)"
+      case BitsType1(bitEndian) =>
+        s"await $io.ReadBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}Async(1, cancellationToken) != 0"
+      case BitsType(width: Int, bitEndian) =>
+        s"await $io.ReadBitsInt${Utils.upperCamelCase(bitEndian.toSuffix)}Async($width, cancellationToken)"
       case t: UserType =>
         val addParams = Utils.join(t.args.map((a) => translator.translate(a)), "", ", ", ", ")
         val addArgs = if (t.isOpaque) {
@@ -426,8 +453,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     expr2
   }
 
-  override def userTypeDebugRead(id: String): Unit =
-    out.puts(s"await $id.ReadAsync(cancellationToken);")
+  override def userTypeDebugRead(id: String, dataType: DataType, assignType: DataType): Unit = {
+    val expr = if (assignType != dataType) {
+      s"((${kaitaiType2NativeType(dataType)}) ($id))"
+    } else {
+      id
+    }
+    out.puts(s"$expr.ReadAsync(cancellationToken);")
+  }
 
   override def switchRequiresIfs(onType: DataType): Boolean = onType match {
     case _: IntType | _: EnumType | _: StrType => false
@@ -610,14 +643,14 @@ class CSharpAsyncCompiler(val typeProvider: ClassTypeProvider, config: RuntimeCo
     attrId: Identifier,
     attrType: DataType,
     checkExpr: Ast.expr,
-    errName: String,
+    err: KSError,
     errArgs: List[Ast.expr]
   ): Unit = {
     val errArgsStr = errArgs.map(translator.translate).mkString(", ")
     out.puts(s"if (!(${translator.translate(checkExpr)}))")
     out.puts("{")
     out.inc
-    out.puts(s"throw new $errName($errArgsStr);")
+    out.puts(s"throw new ${ksErrorName(err)}($errArgsStr);")
     out.dec
     out.puts("}")
   }
@@ -653,7 +686,7 @@ object CSharpAsyncCompiler extends LanguageCompilerStatic
       case FloatMultiType(Width4, _) => "float"
       case FloatMultiType(Width8, _) => "double"
 
-      case BitsType(_) => "ulong"
+      case BitsType(_, _) => "ulong"
 
       case CalcIntType => "int"
       case CalcFloatType => "double"
@@ -664,7 +697,7 @@ object CSharpAsyncCompiler extends LanguageCompilerStatic
 
       case AnyType => "object"
       case KaitaiStructType | CalcKaitaiStructType => kstructName
-      case KaitaiStreamType => kstreamName
+      case KaitaiStreamType | OwnedKaitaiStreamType => kstreamName
 
       case t: UserType => types2class(t.name)
       case EnumType(name, _) => types2class(name)
@@ -698,6 +731,4 @@ object CSharpAsyncCompiler extends LanguageCompilerStatic
     case EndOfStreamError => "EndOfStreamException"
     case _ => err.name
   }
-
-  override def type2class(name: String): String = Utils.upperCamelCase(name)
 }
