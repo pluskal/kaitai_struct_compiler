@@ -136,8 +136,7 @@ class CSharpAsyncCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig
 
   override def classConstructorFooter: Unit = fileFooter(null)
 
-  override def runRead(name: List[String]): Unit =
-    out.puts("_read();")
+  override def runRead(name: List[String]): Unit = {}
 
   override def runReadCalc(): Unit = {
     out.puts
