@@ -470,6 +470,65 @@ class CSharpAsyncCompiler(typeProvider: ClassTypeProvider, config: RuntimeConfig
 
   val NAME_SWITCH_ON = Ast.expr.Name(Ast.identifier(Identifier.SWITCH_ON))
 
+  protected override def switchCasesRender[T](
+    id: Identifier,
+    on: Ast.expr,
+    cases: Map[Ast.expr, T],
+    normalCaseProc: (T) => Unit,
+    elseCaseProc: (T) => Unit
+  ): Unit = {
+    val someNormalCases = cases.filter { case (caseExpr, _) =>
+      caseExpr != SwitchType.ELSE_CONST
+    }.size > 0
+
+    if (someNormalCases) {
+      switchStart(id, on)
+
+      // Pass 1: only normal case clauses
+      var first = true
+
+      cases.foreach { case (condition, result) =>
+        condition match {
+          case SwitchType.ELSE_CONST =>
+          // skip for now
+          case _ =>
+            if (first) {
+              switchCaseFirstStart(condition)
+              first = false
+            } else {
+              switchCaseStart(condition)
+            }
+            normalCaseProc(result)
+            switchCaseEnd()
+        }
+      }
+
+      // Pass 2: else clause, if it is there
+      cases.get(SwitchType.ELSE_CONST) match {
+       case Some(result) => {
+         switchElseStart()
+         elseCaseProc(result)
+         switchElseEnd()
+       }
+       case None =>{
+         switchElseStart()
+         out.puts(s"""throw new InvalidOperationException("Default switch branch hit in \\"${id.humanReadable}\\"");""");
+         switchElseEnd()
+
+         // TODO signaling error from compiler would be best but cannot be done yet
+         // https://github.com/kaitai-io/kaitai_struct/issues/208
+         // throw new RuntimeException(s"Switch default must be explicitly defined (${id.humanReadable}).")
+       }
+     }
+
+      switchEnd()
+    } else {
+      cases.get(SwitchType.ELSE_CONST).foreach { (result) =>
+        elseCaseProc(result)
+      }
+    }
+  }
+
   override def switchStart(id: Identifier, on: Ast.expr): Unit =
     out.puts(s"switch (${expression(on)}) {")
 
